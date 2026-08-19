@@ -1,7 +1,8 @@
+import asyncio
 from datetime import datetime
 from typing import Annotated
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -11,7 +12,7 @@ from jobsearch.config import get_settings
 from jobsearch.database.models import MatchJob
 from jobsearch.database.session import get_session, get_sessionmaker
 from jobsearch.services.match import SortKey, count_shortlist, get_shortlist
-from jobsearch.services.pipeline import get_latest_resume, get_or_create_local_user, run_pipeline
+from jobsearch.services.pipeline import PHASES, SOURCES, get_latest_resume, get_or_create_local_user, run_pipeline
 
 router = APIRouter(dependencies=[RequireServiceKey])
 
@@ -19,6 +20,9 @@ router = APIRouter(dependencies=[RequireServiceKey])
 # move to a DB row if this ever runs multi-worker
 _running = False
 _last_error: str | None = None
+_phase: str | None = None
+_progress: dict[str, object] | None = None
+_task: asyncio.Task | None = None
 
 SessionDep = Annotated[AsyncSession, Depends(get_session)]
 
@@ -26,6 +30,9 @@ SessionDep = Annotated[AsyncSession, Depends(get_session)]
 class RunPipelineRequest(BaseModel):
     # omit it to run against whatever the profile has stored
     resume_text: str | None = Field(default=None, min_length=50, description="Plain-text resume")
+    # omit it to ingest from every source; [] skips ingest and just re-retrieves/re-scores
+    # what's already stored
+    sources: list[str] | None = Field(default=None, description=f"subset of {SOURCES}")
 
 
 class ShortlistItem(BaseModel):
@@ -44,12 +51,27 @@ class ShortlistPage(BaseModel):
     total: int
 
 
-async def _run_in_background(resume_text: str) -> None:
+def _set_phase(name: str) -> None:
+    global _phase, _progress
+    _phase = name
+    _progress = None  # a new phase starts with no sub-progress yet
+
+
+def _set_progress(source: str, done: int, total: int) -> None:
+    global _progress
+    _progress = {"source": source, "done": done, "total": total}
+
+
+async def _run_in_background(resume_text: str, sources: set[str] | None) -> None:
     global _running, _last_error
     try:
         async with get_sessionmaker()() as session:
-            await run_pipeline(session, resume_text)
+            await run_pipeline(
+                session, resume_text, on_phase=_set_phase, on_progress=_set_progress, sources=sources
+            )
         _last_error = None
+    except asyncio.CancelledError:
+        _last_error = "Stopped"
     except Exception as exc:  # noqa: BLE001 — surface via /pipeline/status, don't kill the worker
         _last_error = f"{type(exc).__name__}: {exc}"
     finally:
@@ -57,10 +79,8 @@ async def _run_in_background(resume_text: str) -> None:
 
 
 @router.post("/pipeline/run", status_code=status.HTTP_202_ACCEPTED, tags=["Pipeline"])
-async def start_pipeline(
-    request: RunPipelineRequest, background_tasks: BackgroundTasks, session: SessionDep
-) -> dict[str, str]:
-    global _running
+async def start_pipeline(request: RunPipelineRequest, session: SessionDep) -> dict[str, str]:
+    global _running, _phase, _progress, _task
     if not get_settings().openai_api_key:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -68,6 +88,8 @@ async def start_pipeline(
         )
     if _running:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="A pipeline run is already in progress")
+    if request.sources is not None and (unknown := set(request.sources) - set(SOURCES)):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"unknown source(s): {sorted(unknown)}")
 
     resume_text = request.resume_text
     if resume_text is None:
@@ -81,8 +103,19 @@ async def start_pipeline(
         resume_text = resume.raw_text
 
     _running = True
-    background_tasks.add_task(_run_in_background, resume_text)
+    _phase = PHASES[0]
+    _progress = None
+    sources = set(request.sources) if request.sources is not None else None
+    _task = asyncio.create_task(_run_in_background(resume_text, sources))
     return {"status": "started"}
+
+
+@router.post("/pipeline/stop", tags=["Pipeline"])
+async def stop_pipeline() -> dict[str, str]:
+    if not _running or _task is None:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="No pipeline run in progress")
+    _task.cancel()
+    return {"status": "stopping"}
 
 
 @router.get("/pipeline/status", tags=["Pipeline"])
@@ -90,7 +123,15 @@ async def pipeline_status(session: SessionDep) -> dict[str, object]:
     counts = dict(
         (await session.execute(select(MatchJob.status, func.count()).group_by(MatchJob.status))).all()
     )
-    return {"running": _running, "jobs": counts, "last_error": _last_error}
+    return {
+        "running": _running,
+        "phase": _phase,
+        "phases": PHASES,
+        "progress": _progress,
+        "sources": SOURCES,
+        "jobs": counts,
+        "last_error": _last_error,
+    }
 
 
 @router.get("/shortlist", tags=["Pipeline"])

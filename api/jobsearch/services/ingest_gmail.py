@@ -14,7 +14,7 @@ import email.utils
 import imaplib
 from datetime import datetime
 from email.message import Message
-from typing import Any
+from typing import Any, Callable
 
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -156,7 +156,7 @@ def _finish_message(client: imaplib.IMAP4_SSL, uid: bytes) -> None:
     client.uid("STORE", uid, "+FLAGS", "\\Deleted")
 
 
-async def ingest_gmail(session: AsyncSession) -> int:
+async def ingest_gmail(session: AsyncSession, on_progress: Callable[[int, int], None] | None = None) -> int:
     """Read unseen alert mail from the configured senders, store the postings, then
     trash each mail. Returns the number of postings stored."""
     settings = get_settings()
@@ -166,7 +166,8 @@ async def ingest_gmail(session: AsyncSession) -> int:
     client = _connect()
     stored = 0
     try:
-        for uid in _search_senders(client, settings.gmail_senders):
+        uids = _search_senders(client, settings.gmail_senders)
+        for i, uid in enumerate(uids):
             _, data = client.uid("FETCH", uid, "(RFC822)")
             message = email.message_from_bytes(data[0][1])
             message_id = message.get("Message-ID") or f"unknown:{uid.decode()}"
@@ -176,6 +177,8 @@ async def ingest_gmail(session: AsyncSession) -> int:
             if rows:
                 stored += await upsert_job_postings(session, rows)
             _finish_message(client, uid)
+            if on_progress:
+                on_progress(i + 1, len(uids))
         client.expunge()
     finally:
         client.logout()

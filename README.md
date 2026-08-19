@@ -74,8 +74,9 @@ if any field came out blank, and gives you 8s to Ctrl-C.
 | `web` | Next.js 16 UI. Server routes proxy to the API so the key stays server-side. |
 | `GET/PUT /profile/resume` | The stored CV, as markdown or plain text. Same text = same row, so keywords are extracted once. |
 | `PUT /profile/resume/pdf` | Raw `application/pdf` body; the text layer becomes the stored CV. Scans are rejected — no OCR. |
-| `POST /pipeline/run` | Starts a run in the background. Omit `resume_text` to use the stored CV. 409 if one is already going. |
-| `GET /pipeline/status` | `running`, job counts by status, last error. |
+| `POST /pipeline/run` | Starts a run in the background. Omit `resume_text` to use the stored CV. Omit `sources` to ingest from all of them (`[]` skips ingest, just re-retrieves/re-scores). 409 if one is already going. |
+| `POST /pipeline/stop` | Cancels the in-flight run. 409 if none is running. |
+| `GET /pipeline/status` | `running`, current `phase`, per-source ingest `progress`, job counts by status, last error. |
 | `GET /shortlist?limit&offset&sort&remote` | Scored matches above threshold, paged: `{items, total}`. `sort` = `score`\|`newest`\|`added`; `remote` omitted = any. |
 | `cli.backfill_remote` | One-off: re-read eldorado detail pages to fill `remote` on rows ingested before the column existed. |
 | `cli.match_pipeline <resume.txt>` | The weekly run a cron calls. |

@@ -21,7 +21,3 @@ async def embed(texts: list[str]) -> list[list[float]]:
         )
         vectors.extend(item.embedding for item in sorted(response.data, key=lambda d: d.index))
     return vectors
-
-
-async def embed_one(text: str) -> list[float]:
-    return (await embed([text]))[0]

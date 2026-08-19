@@ -11,12 +11,16 @@ A, B, C, D = (uuid.UUID(int=n) for n in range(1, 5))
 
 
 def _stub_channels(monkeypatch, dense: list[uuid.UUID], lexical: list[uuid.UUID]) -> None:
-    async def fake_dense(session, query, top_k):
+    async def fake_embed(texts):
+        return [[0.0] for _ in texts]
+
+    async def fake_dense(session, query_vector, top_k):
         return dense[:top_k]
 
     async def fake_lexical(session, query, top_k):
         return lexical[:top_k]
 
+    monkeypatch.setattr(retrieve_module, "embed", fake_embed)
     monkeypatch.setattr(retrieve_module, "_dense_ranking", fake_dense)
     monkeypatch.setattr(retrieve_module, "_lexical_ranking", fake_lexical)
 

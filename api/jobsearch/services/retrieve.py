@@ -16,7 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from jobsearch.config import get_settings
 from jobsearch.database.models import JobPosting
-from jobsearch.services.embeddings import embed, embed_one
+from jobsearch.services.embeddings import embed
 
 RRF_K = 60  # standard smoothing constant: rank 1 scores 1/61, rank 2 1/62, ...
 
@@ -49,8 +49,7 @@ async def embed_new_postings(session: AsyncSession) -> int:
     return len(rows)
 
 
-async def _dense_ranking(session: AsyncSession, query: str, top_k: int) -> Sequence[uuid.UUID]:
-    query_vector = await embed_one(query)
+async def _dense_ranking(session: AsyncSession, query_vector: list[float], top_k: int) -> Sequence[uuid.UUID]:
     return (
         await session.scalars(
             select(JobPosting.id)
@@ -82,10 +81,13 @@ async def retrieve(session: AsyncSession, queries: Sequence[str], top_k: int | N
     if top_k is None:
         top_k = get_settings().retrieval_top_k
 
+    # one batched call for every query's vector, instead of one call per query
+    query_vectors = await embed(list(queries))
+
     scores: dict[uuid.UUID, float] = defaultdict(float)
-    for query in queries:
+    for query, query_vector in zip(queries, query_vectors, strict=True):
         for ranking in (
-            await _dense_ranking(session, query, top_k),
+            await _dense_ranking(session, query_vector, top_k),
             await _lexical_ranking(session, query, top_k),
         ):
             for rank, posting_id in enumerate(ranking, start=1):

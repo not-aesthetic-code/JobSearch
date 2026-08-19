@@ -5,7 +5,7 @@ BeautifulSoup is enough, no headless browser."""
 
 import asyncio
 import re
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import urlsplit
 
 import httpx
@@ -47,7 +47,12 @@ def _parse_detail_page(html: str, offer_id: str) -> dict[str, Any] | None:
     return parse_jsonld_posting(html, SOURCE, offer_id, f"{BASE_URL}/praca/{offer_id}")
 
 
-async def ingest_eldorado(session: AsyncSession, keywords: list[str], max_pages: int = 2) -> int:
+async def ingest_eldorado(
+    session: AsyncSession,
+    keywords: list[str],
+    max_pages: int = 2,
+    on_progress: Callable[[int, int], None] | None = None,
+) -> int:
     """Search each keyword, fetch detail pages for offers we haven't seen yet,
     upsert. Returns the number of new postings."""
     async with httpx.AsyncClient(
@@ -71,14 +76,16 @@ async def ingest_eldorado(session: AsyncSession, keywords: list[str], max_pages:
             )
         )
 
+        new_offer_ids = list(set(paths) - known)
         rows = []
-        for offer_id in set(paths) - known:
+        for i, offer_id in enumerate(new_offer_ids):
             response = await client.get(paths[offer_id])
-            if response.status_code != 200:
-                continue
-            row = _parse_detail_page(response.text, offer_id)
-            if row is not None:
-                rows.append(row)
+            if response.status_code == 200:
+                row = _parse_detail_page(response.text, offer_id)
+                if row is not None:
+                    rows.append(row)
+            if on_progress:
+                on_progress(i + 1, len(new_offer_ids))
             await asyncio.sleep(0.3)  # be polite, it's a free site
 
     return await upsert_job_postings(session, rows)
