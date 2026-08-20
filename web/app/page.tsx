@@ -1,7 +1,9 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
+import { errorDetail } from "@/lib/errorDetail";
+import { usePipelineProgress, type PipelineStatus } from "@/lib/usePipelineProgress";
 
 type ShortlistItem = {
   score: number;
@@ -17,16 +19,6 @@ type ShortlistItem = {
 type ShortlistPage = {
   items: ShortlistItem[];
   total: number;
-};
-
-type PipelineStatus = {
-  running: boolean;
-  phase: string | null;
-  phases: string[];
-  progress: { source: string; done: number; total: number } | null;
-  sources: string[];
-  jobs: Record<string, number>;
-  last_error: string | null;
 };
 
 const PAGE_SIZE = 10;
@@ -46,14 +38,6 @@ const PHASE_LABELS: Record<string, string> = {
   score: "Score",
   done: "Done",
 };
-
-function formatDuration(seconds: number): string {
-  if (seconds < 1) return "a few seconds";
-  if (seconds < 60) return `${Math.ceil(seconds)}s`;
-  const m = Math.floor(seconds / 60);
-  const s = Math.round(seconds % 60);
-  return s ? `${m}m ${s}s` : `${m}m`;
-}
 
 function PhaseStepper({ phases, current }: { phases: string[]; current: string | null }) {
   const currentIndex = current ? phases.indexOf(current) : -1;
@@ -179,22 +163,6 @@ function SourceToggle({
   );
 }
 
-/** Whichever count is currently drivable as a progress bar: score jobs, or the
- * ingest source currently fetching. Null when the phase has nothing countable. */
-function currentBar(status: PipelineStatus | null): { key: string; done: number; total: number } | null {
-  if (!status) return null;
-  if (status.phase === "score") {
-    const jobs = status.jobs ?? {};
-    const done = (jobs.completed ?? 0) + (jobs.failed ?? 0);
-    const total = done + (jobs.pending ?? 0) + (jobs.processing ?? 0);
-    return total ? { key: "score", done, total } : null;
-  }
-  if (status.phase === "ingest" && status.progress) {
-    return { key: `ingest:${status.progress.source}`, done: status.progress.done, total: status.progress.total };
-  }
-  return null;
-}
-
 function daysAgo(iso: string | null): string | null {
   if (!iso) return null;
   const days = Math.floor((Date.now() - new Date(iso).getTime()) / 86_400_000);
@@ -212,14 +180,7 @@ export default function Home() {
   const [hasResume, setHasResume] = useState<boolean | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [sources, setSources] = useState<Set<string>>(new Set(SOURCE_ORDER));
-  const [toast, setToast] = useState<{ completed: number; failed: number } | null>(null);
-  const [, setTick] = useState(0); // forces a re-render each second so the elapsed/ETA clock ticks
-  const runStartRef = useRef<number | null>(null);
-  const phaseStartRef = useRef<Record<string, number>>({});
-  // rate baseline for whichever count is currently driving a progress bar (score jobs,
-  // or an ingest source's item count) — keyed so switching source/phase resets the rate
-  const rateBaselineRef = useRef<{ key: string; time: number; done: number } | null>(null);
-  const prevRunningRef = useRef(false);
+  const { toast, dismissToast, bar, barPct, elapsedLabel, etaLabel, jobsLine } = usePipelineProgress(status);
 
   const refresh = useCallback(async () => {
     const params = new URLSearchParams({
@@ -255,43 +216,6 @@ export default function Home() {
     return () => clearInterval(timer);
   }, [status?.running, refresh]);
 
-  // tick the elapsed/ETA clock once a second while running
-  useEffect(() => {
-    if (!status?.running) return;
-    const timer = setInterval(() => setTick((n) => n + 1), 1000);
-    return () => clearInterval(timer);
-  }, [status?.running]);
-
-  // track phase timing for the ETA heuristic, and fire the completion toast
-  useEffect(() => {
-    if (!status) return;
-    if (status.running) {
-      if (runStartRef.current === null) runStartRef.current = Date.now();
-      if (status.phase && phaseStartRef.current[status.phase] === undefined) {
-        phaseStartRef.current[status.phase] = Date.now();
-      }
-      const bar = currentBar(status);
-      if (bar && rateBaselineRef.current?.key !== bar.key) {
-        rateBaselineRef.current = { key: bar.key, time: Date.now(), done: bar.done };
-      }
-    }
-    if (prevRunningRef.current && !status.running) {
-      const jobsNow = status.jobs ?? {};
-      if (!status.last_error) setToast({ completed: jobsNow.completed ?? 0, failed: jobsNow.failed ?? 0 });
-      runStartRef.current = null;
-      phaseStartRef.current = {};
-      rateBaselineRef.current = null;
-    }
-    prevRunningRef.current = status.running;
-  }, [status]);
-
-  // auto-dismiss the completion toast
-  useEffect(() => {
-    if (!toast) return;
-    const timer = setTimeout(() => setToast(null), 6000);
-    return () => clearTimeout(timer);
-  }, [toast]);
-
   function toggleSource(source: string) {
     setSources((prev) => {
       const next = new Set(prev);
@@ -311,8 +235,7 @@ export default function Home() {
       body: JSON.stringify({ sources: [...sources] }),
     });
     if (!res.ok) {
-      const body = await res.json().catch(() => ({}));
-      setError(typeof body.detail === "string" ? body.detail : "Request failed");
+      setError(errorDetail(await res.json().catch(() => null)));
       return;
     }
     refresh();
@@ -322,32 +245,10 @@ export default function Home() {
     setError(null);
     const res = await fetch("/api/pipeline/stop", { method: "POST" });
     if (!res.ok) {
-      const body = await res.json().catch(() => ({}));
-      setError(typeof body.detail === "string" ? body.detail : "Request failed");
+      setError(errorDetail(await res.json().catch(() => null)));
       return;
     }
     refresh();
-  }
-
-  const jobs = status?.jobs ?? {};
-  const jobsLine = ["pending", "processing", "completed", "failed"]
-    .filter((s) => jobs[s])
-    .map((s) => `${jobs[s]} ${s}`)
-    .join(" · ");
-
-  const bar = currentBar(status);
-  const barPct = bar?.total ? Math.round((bar.done / bar.total) * 100) : 0;
-
-  const elapsedSec = runStartRef.current ? (Date.now() - runStartRef.current) / 1000 : 0;
-  let etaLabel: string | null = null;
-  if (bar && rateBaselineRef.current?.key === bar.key) {
-    const { time, done } = rateBaselineRef.current;
-    const sinceSec = (Date.now() - time) / 1000;
-    const doneSince = bar.done - done;
-    if (sinceSec > 2 && doneSince > 0 && bar.total > bar.done) {
-      const rate = doneSince / sinceSec; // items/sec
-      etaLabel = formatDuration((bar.total - bar.done) / rate);
-    }
   }
 
   const lastPage = Math.max(0, Math.ceil(page.total / PAGE_SIZE) - 1);
@@ -440,7 +341,7 @@ export default function Home() {
             <p className="mt-1.5 text-center text-xs text-gray-500 dark:text-gray-400">{jobsLine}</p>
           )}
           <p className="mt-2 text-center text-xs tabular-nums text-gray-400 dark:text-gray-600">
-            {formatDuration(elapsedSec)} elapsed
+            {elapsedLabel} elapsed
           </p>
         </div>
       )}
@@ -454,7 +355,7 @@ export default function Home() {
             Run complete — {toast.completed} scored{toast.failed ? `, ${toast.failed} failed` : ""}.
           </span>
           <button
-            onClick={() => setToast(null)}
+            onClick={dismissToast}
             className="ml-auto text-gray-400 hover:text-gray-600 dark:hover:text-gray-300"
             aria-label="Dismiss"
           >

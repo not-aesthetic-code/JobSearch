@@ -15,11 +15,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from jobsearch.database.models import JobPosting
 from jobsearch.database.operations.job_posting import upsert_job_postings
-from jobsearch.services.ingest_board import parse_jsonld_posting
+from jobsearch.services.ingest_board import HEADERS, parse_jsonld_posting
 
 BASE_URL = "https://czyjesteldorado.pl"
 SOURCE = "eldorado"
-_HEADERS = {"User-Agent": "jobsearch (personal project)"}
 # offer detail paths look like /praca/261752-senior-react-native-developer-...;
 # other /praca/ links (e.g. /praca/firma/allegro) are not offers
 _OFFER_PATH_RE = re.compile(r"^/praca/(\d+)-")
@@ -56,7 +55,7 @@ async def ingest_eldorado(
     """Search each keyword, fetch detail pages for offers we haven't seen yet,
     upsert. Returns the number of new postings."""
     async with httpx.AsyncClient(
-        base_url=BASE_URL, headers=_HEADERS, timeout=30.0, follow_redirects=True
+        base_url=BASE_URL, headers=HEADERS, timeout=30.0, follow_redirects=True
     ) as client:
         paths: dict[str, str] = {}
         for keyword in keywords:

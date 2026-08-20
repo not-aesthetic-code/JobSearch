@@ -29,7 +29,7 @@ from jobsearch.database.models import JobPosting
 from jobsearch.database.operations.job_posting import upsert_job_postings
 
 BOARDS_PATH = Path("boards.json")
-_HEADERS = {"User-Agent": "jobsearch (personal project)"}
+HEADERS = {"User-Agent": "jobsearch (personal project)"}  # shared with ingest_eldorado
 
 
 class BoardConfig(BaseModel):
@@ -144,7 +144,7 @@ async def collect_offers(client: httpx.AsyncClient, config: BoardConfig, keyword
 async def ingest_board(session: AsyncSession, config: BoardConfig, keywords: list[str]) -> int:
     """Search, fetch the detail pages we haven't seen, upsert. New postings only —
     a rerun skips everything already stored, so it costs one search per keyword."""
-    async with httpx.AsyncClient(headers=_HEADERS, timeout=30.0, follow_redirects=True) as client:
+    async with httpx.AsyncClient(headers=HEADERS, timeout=30.0, follow_redirects=True) as client:
         offers = await collect_offers(client, config, keywords)
         if not offers:
             return 0

@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
+import { errorDetail } from "@/lib/errorDetail";
 
 type StoredResume = {
   text: string;
@@ -37,7 +38,7 @@ export default function Profile() {
       const res = await fetch(path, { method: "PUT", ...init });
       const body = await res.json().catch(() => null);
       if (!res.ok) {
-        setError(typeof body?.detail === "string" ? body.detail : "Save failed");
+        setError(errorDetail(body, "Save failed"));
         return;
       }
       setStored(body);
