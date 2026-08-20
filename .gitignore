@@ -1,0 +1,5 @@
+.DS_Store
+
+# skills.sh CLI artifacts (local tooling, not part of this project)
+/.agents/
+/skills-lock.json

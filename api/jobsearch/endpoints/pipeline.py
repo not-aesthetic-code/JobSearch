@@ -141,9 +141,12 @@ async def shortlist(
     offset: Annotated[int, Query(ge=0)] = 0,
     sort: SortKey = "score",
     remote: Annotated[bool | None, Query(description="omit for any; true/false filters out unknowns")] = None,
+    min_score: Annotated[
+        int | None, Query(ge=0, le=100, description="omit for the configured match threshold")
+    ] = None,
 ) -> ShortlistPage:
     user = await get_or_create_local_user(session)
-    rows = await get_shortlist(session, user.id, limit=limit, offset=offset, sort=sort, remote=remote)
+    rows = await get_shortlist(session, user.id, min_score=min_score, limit=limit, offset=offset, sort=sort, remote=remote)
     return ShortlistPage(
         items=[
             ShortlistItem(
@@ -158,5 +161,5 @@ async def shortlist(
             )
             for score, summary, title, company, url, is_remote, location, posted_at in rows
         ],
-        total=await count_shortlist(session, user.id, remote=remote),
+        total=await count_shortlist(session, user.id, min_score=min_score, remote=remote),
     )

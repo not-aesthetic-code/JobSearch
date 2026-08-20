@@ -11,7 +11,7 @@ the flow and [docs/adr](docs/adr) for the decisions that shaped it.
 ## Run it
 
 ```bash
-docker compose -f api/docker-compose.yml up -d       # postgres + pgvector on :5434
+docker compose up -d postgres                        # pgvector on :5434
 
 cd api
 cp .env.example .env                                 # set OPENAI_API_KEY at minimum
@@ -25,12 +25,16 @@ npm install
 npm run dev                                          # http://localhost:3000
 ```
 
+Or run the whole stack in containers with `docker compose up -d` — it builds
+`api` and `web` from their `Dockerfile`s too (same images `railway.toml` in
+each directory deploys).
+
 Save your CV once on **/profile** — paste it as markdown or upload a PDF — then
 hit **Find offers** on the home page, watch the job counters, and sort or filter
 the shortlist (best match / newest / recently added, remote / on-site). Runs take
 a few minutes — scraping and scoring dominate.
 
-Tests: `cd api && uv run pytest` (24 tests, no network, no DB).
+Tests: `cd api && uv run pytest` (42 tests, no network, no DB).
 
 ## What it can do today
 

@@ -109,6 +109,14 @@ const MODES = [
   { value: "false", label: "On-site" },
 ] as const;
 
+// "" defers to the backend's configured match_threshold (currently 60)
+const MIN_SCORES = [
+  { value: "", label: "Shortlist" },
+  { value: "40", label: "40+" },
+  { value: "20", label: "20+" },
+  { value: "0", label: "Any" },
+] as const;
+
 function Chip({
   active,
   onClick,
@@ -200,6 +208,7 @@ export default function Home() {
   const [pageIndex, setPageIndex] = useState(0);
   const [sort, setSort] = useState<string>("score");
   const [remote, setRemote] = useState<string>("");
+  const [minScore, setMinScore] = useState<string>("");
   const [hasResume, setHasResume] = useState<boolean | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [sources, setSources] = useState<Set<string>>(new Set(SOURCE_ORDER));
@@ -219,6 +228,7 @@ export default function Home() {
       sort,
     });
     if (remote) params.set("remote", remote);
+    if (minScore) params.set("min_score", minScore);
     try {
       const [statusRes, listRes, resumeRes] = await Promise.all([
         fetch("/api/pipeline/status"),
@@ -232,7 +242,7 @@ export default function Home() {
     } catch {
       setError("Backend unreachable — is the FastAPI server running?");
     }
-  }, [pageIndex, sort, remote]);
+  }, [pageIndex, sort, remote, minScore]);
 
   useEffect(() => {
     refresh();
@@ -492,6 +502,21 @@ export default function Home() {
             </Chip>
           ))}
         </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-sm text-gray-500 dark:text-gray-400">Score</span>
+          {MIN_SCORES.map((option) => (
+            <Chip
+              key={option.value}
+              active={minScore === option.value}
+              onClick={() => {
+                setMinScore(option.value);
+                setPageIndex(0);
+              }}
+            >
+              {option.label}
+            </Chip>
+          ))}
+        </div>
       </div>
 
       <p className="mt-3 text-sm text-gray-500 dark:text-gray-400">
@@ -531,8 +556,8 @@ export default function Home() {
         ))}
         {page.total === 0 && (
           <li className="text-sm text-gray-500 dark:text-gray-400">
-            {remote
-              ? "Nothing matches this work mode — try Any."
+            {remote || minScore
+              ? "Nothing matches these filters — try widening Work mode or Score."
               : "Nothing yet — run it to populate the shortlist."}
           </li>
         )}
