@@ -1,7 +1,7 @@
 """Open a shortlisted offer's application form in a real browser, fill it, and
 either hand you the window or submit it.
 
-Run: uv run python -m cli.apply <shortlist position> [--submit] [--min-confidence 0.7]
+Run: uv run python -m cli.apply <shortlist position | --match-id UUID> [--submit] [--min-confidence 0.7]
 
 Two passes over the form. The keyword table below answers the fields that are
 always the same — name, email, phone. Everything else (dropdowns, radio groups,
@@ -33,6 +33,8 @@ PROFILE_PATH = Path("profile.json")
 BROWSER_PROFILE_DIR = Path(".playwright-profile")
 SCREENSHOT_DIR = Path("/tmp")
 FIELD_SELECTOR = "input, textarea, select"
+MAX_APPLY_HOPS = 3
+MIN_FORM_FIELDS = 3  # fewer than this is a login box or a newsletter field, not the application
 MAX_STEPS = 6  # Workday/Greenhouse wizards; a cap so a broken Next never loops forever
 
 # label fragment -> profile.json key. Polish included because half the boards are PL.
@@ -54,6 +56,7 @@ FIELD_PATTERNS: list[tuple[tuple[str, ...], str]] = [
 
 CONSENT_HINTS = ("consent", "zgod", "rodo", "gdpr", "privacy", "polityk", "terms", "regulamin")
 APPLY_HINTS = ("apply", "aplikuj", "apply now", "złóż aplikację", "zloz aplikacje", "send application")
+COOKIE_HINTS = ("decline all", "accept cookies", "accept all", "akceptuję", "akceptuj wszystkie", "zgadzam się")
 NEXT_HINTS = ("next", "continue", "dalej", "kontynuuj", "next step", "save and continue")
 SUBMIT_HINTS = ("submit", "submit application", "wyślij", "wyslij", "send application", "aplikuj teraz")
 
@@ -98,6 +101,8 @@ def match_field(label: str) -> str | None:
     text = label.strip().lower()
     if not text:
         return None
+    if text.strip(" *:") in {"name", "imię", "imie"}:  # bare "Name" means first name next to "Surname"
+        return "first_name"
     best: tuple[int, str] | None = None
     for fragments, key in FIELD_PATTERNS:
         for fragment in fragments:
@@ -159,19 +164,35 @@ def load_profile() -> dict[str, Any]:
     return json.loads(PROFILE_PATH.read_text())
 
 
-async def _click_first(page: Page, hints: tuple[str, ...]) -> bool:
+async def _click_first(page: Page, hints: tuple[str, ...], anything: bool = False) -> bool:
+    """Click the first visible link/button whose text contains a hint. Matched by
+    text, not ARIA role: modals (cookie walls) mark the whole page aria-hidden,
+    which makes role queries see nothing. A blocked candidate is skipped after an
+    Escape (closes 'create an account' popovers) rather than hanging for 30s."""
     for hint in hints:
-        candidate = page.get_by_role("link", name=hint, exact=False).or_(
-            page.get_by_role("button", name=hint, exact=False)
-        )
-        if not await candidate.count():
-            continue
-        # the click may navigate this tab, open a popup, or just reveal a modal —
-        # the caller re-reads context.pages[-1], so all three land in the same place
-        await candidate.first.click()
-        await page.wait_for_timeout(2500)
-        return True
+        if anything:  # cookie walls: their buttons are often plain divs; get_by_text matches the innermost element
+            candidates = page.get_by_text(hint).filter(visible=True)
+        else:
+            candidates = page.locator("a:visible, button:visible, [role=button]:visible").filter(has_text=hint)  # str: case-insensitive substring
+        for i in range(min(await candidates.count(), 4)):
+            try:
+                # the click may navigate this tab, open a popup, or just reveal a modal —
+                # the caller re-reads context.pages[-1], so all three land in the same place
+                await candidates.nth(i).click(timeout=3000)
+            except Exception:  # noqa: BLE001 — covered/detached: dismiss whatever is on top, try the next
+                await page.keyboard.press("Escape")
+                continue
+            await page.wait_for_timeout(2500)
+            return True
     return False
+
+
+async def _dismiss_banners(page: Page) -> None:
+    """Cookie walls render a beat after load and block every click under them."""
+    for _ in range(3):
+        await page.wait_for_timeout(1500)
+        if await _click_first(page, COOKIE_HINTS, anything=True):
+            return
 
 
 def _nth(page: Page, index: int) -> Locator:
@@ -267,7 +288,7 @@ async def _tick_consents(page: Page) -> list[str]:
     return ticked
 
 
-async def main(position: int, submit: bool, min_confidence: float) -> None:
+async def main(position: int | None, match_id: str | None, submit: bool, min_confidence: float) -> None:
     profile = load_profile()
 
     async with get_sessionmaker()() as session:
@@ -277,8 +298,13 @@ async def main(position: int, submit: bool, min_confidence: float) -> None:
 
     if resume is None:
         sys.exit("No resume saved. Save one on /profile first — the answers are grounded in it.")
-    if not 1 <= position <= len(shortlist):
-        sys.exit(f"Shortlist has {len(shortlist)} entries; pick 1-{len(shortlist)}")
+    if match_id is not None:  # launched from the web UI, where list positions shift as cards are dismissed
+        entry = next((row for row in shortlist if str(row[8]) == match_id), None)
+        if entry is None:
+            sys.exit(f"match {match_id} is not on the shortlist")
+        position = shortlist.index(entry) + 1
+    elif position is None or not 1 <= position <= len(shortlist):
+        sys.exit(f"Shortlist has {len(shortlist)} entries; pick 1-{len(shortlist)} or pass --match-id")
     score, summary, title, company, url, *_ = shortlist[position - 1]
     job_text = f"{title} at {company or 'unknown company'}\n{summary}"
     print(f"[{score}] {title} — {company or '?'}\n      {url}\n")
@@ -287,44 +313,62 @@ async def main(position: int, submit: bool, min_confidence: float) -> None:
         context = await playwright.chromium.launch_persistent_context(
             str(BROWSER_PROFILE_DIR), headless=False, viewport={"width": 1400, "height": 1000}
         )
-        page = context.pages[0] if context.pages else await context.new_page()
-        await page.goto(url, wait_until="domcontentloaded")
-        await _click_first(page, APPLY_HINTS)
-        page = context.pages[-1]
+        async def automate() -> None:
+            page = context.pages[0] if context.pages else await context.new_page()
+            await page.goto(url, wait_until="domcontentloaded")
+            # aggregators (eldorado) link to the employer's page, which has its own Apply
+            # (Workday: job page -> Apply -> form/login). Keep following until a form shows up.
+            await _dismiss_banners(page)
+            for _ in range(MAX_APPLY_HOPS):
+                if not await _click_first(page, APPLY_HINTS):
+                    break
+                page = context.pages[-1]
+                await _dismiss_banners(page)
+                if len(await page.evaluate(_SCRAPE_JS, FIELD_SELECTOR)) >= MIN_FORM_FIELDS:
+                    break
 
-        blanks: list[str] = []
-        for step in range(1, MAX_STEPS + 1):
-            print(f"form step {step}: {page.url}")
-            report = await _fill_form(page, profile, resume.raw_text, job_text, min_confidence)
-            _print(report)
-            blanks += report["blank"]
-            await page.screenshot(path=str(SCREENSHOT_DIR / f"apply-{position}-step{step}.png"), full_page=True)
-            if not await _click_first(page, NEXT_HINTS):
-                break
-            page = context.pages[-1]
+            blanks: list[str] = []
+            for step in range(1, MAX_STEPS + 1):
+                print(f"form step {step}: {page.url}")
+                report = await _fill_form(page, profile, resume.raw_text, job_text, min_confidence)
+                _print(report)
+                blanks += report["blank"]
+                await page.screenshot(path=str(SCREENSHOT_DIR / f"apply-{position}-step{step}.png"), full_page=True)
+                if not await _click_first(page, NEXT_HINTS):
+                    break
+                page = context.pages[-1]
 
-        print(f"\nscreenshots: {SCREENSHOT_DIR}/apply-{position}-step*.png")
+            print(f"\nscreenshots: {SCREENSHOT_DIR}/apply-{position}-step*.png")
 
-        if not submit:
-            print("Browser is open. Review the form, tick the consents, click Submit yourself.")
-        elif blanks:
-            print(f"NOT submitting: {len(blanks)} field(s) left blank. Finish them, or lower --min-confidence.")
-        else:
-            ticked = await _tick_consents(page)
-            for label in ticked:
-                print(f"    ☑ ticking required consent — {label}")
-            print("\nSubmitting in 8s. Ctrl-C to stop.")
-            await page.wait_for_timeout(8000)
-            print("submitted" if await _click_first(page, SUBMIT_HINTS) else "no Submit button found — over to you")
+            if not submit:
+                print("Browser is open. Review the form, tick the consents, click Submit yourself.")
+            elif blanks:
+                print(f"NOT submitting: {len(blanks)} field(s) left blank. Finish them, or lower --min-confidence.")
+            else:
+                ticked = await _tick_consents(page)
+                for label in ticked:
+                    print(f"    ☑ ticking required consent — {label}")
+                print("\nSubmitting in 8s. Ctrl-C to stop.")
+                await page.wait_for_timeout(8000)
+                print("submitted" if await _click_first(page, SUBMIT_HINTS) else "no Submit button found — over to you")
 
-        await asyncio.get_running_loop().run_in_executor(None, input, "Press Enter here when done… ")
+        try:
+            await automate()
+        except Exception as error:  # noqa: BLE001 — a crash must not close the window; the page is still useful
+            print(f"auto-fill stopped: {type(error).__name__}: {error}\nthe browser stays open — carry on by hand.")
+
+        if sys.stdin.isatty():
+            await asyncio.get_running_loop().run_in_executor(None, input, "Press Enter here when done… ")
+        else:  # spawned by the API: no terminal, so the window closing is the "done"
+            await context.wait_for_event("close", timeout=0)
         await context.close()
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Prepare (or send) an application from the shortlist.")
-    parser.add_argument("position", type=int, help="shortlist position, 1 = best match")
+    parser.add_argument("position", type=int, nargs="?", help="shortlist position, 1 = best match")
+    parser.add_argument("--match-id", help="pick the shortlist entry by match id instead of position")
     parser.add_argument("--submit", action="store_true", help="tick required consents and click Submit")
     parser.add_argument("--min-confidence", type=float, default=0.7, help="below this, leave the field blank")
     args = parser.parse_args()
-    asyncio.run(main(args.position, args.submit, args.min_confidence))
+    asyncio.run(main(args.position, args.match_id, args.submit, args.min_confidence))

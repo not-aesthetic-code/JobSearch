@@ -1,4 +1,8 @@
 import asyncio
+import subprocess
+import sys
+import uuid
+from pathlib import Path
 from datetime import datetime
 from typing import Annotated
 
@@ -11,7 +15,7 @@ from jobsearch.auth import RequireServiceKey
 from jobsearch.config import get_settings
 from jobsearch.database.models import MatchJob
 from jobsearch.database.session import get_session, get_sessionmaker
-from jobsearch.services.match import SortKey, count_shortlist, get_shortlist
+from jobsearch.services.match import MatchMark, SortKey, count_shortlist, get_shortlist, mark_match
 from jobsearch.services.pipeline import PHASES, SOURCES, get_latest_resume, get_or_create_local_user, run_pipeline
 
 router = APIRouter(dependencies=[RequireServiceKey])
@@ -23,6 +27,8 @@ _last_error: str | None = None
 _phase: str | None = None
 _progress: dict[str, object] | None = None
 _task: asyncio.Task | None = None
+
+APPLY_LOG = "/tmp/jobsearch-apply.log"
 
 SessionDep = Annotated[AsyncSession, Depends(get_session)]
 
@@ -36,6 +42,9 @@ class RunPipelineRequest(BaseModel):
 
 
 class ShortlistItem(BaseModel):
+    id: uuid.UUID
+    seen: bool
+    applied: bool
     score: int
     summary: str
     title: str
@@ -44,6 +53,7 @@ class ShortlistItem(BaseModel):
     remote: bool | None  # None = the source never said
     location: str | None
     posted_at: datetime | None
+    seniority: str | None  # junior | mid | senior; None = scored before we tracked it
 
 
 class ShortlistPage(BaseModel):
@@ -144,12 +154,16 @@ async def shortlist(
     min_score: Annotated[
         int | None, Query(ge=0, le=100, description="omit for the configured match threshold")
     ] = None,
+    junior: Annotated[bool, Query(description="include junior-level postings (hidden by default)")] = False,
 ) -> ShortlistPage:
     user = await get_or_create_local_user(session)
-    rows = await get_shortlist(session, user.id, min_score=min_score, limit=limit, offset=offset, sort=sort, remote=remote)
+    rows = await get_shortlist(session, user.id, min_score=min_score, limit=limit, offset=offset, sort=sort, remote=remote, junior=junior)
     return ShortlistPage(
         items=[
             ShortlistItem(
+                id=match_id,
+                seen=seen_at is not None,
+                applied=applied_at is not None,
                 score=score,
                 summary=summary,
                 title=title,
@@ -158,8 +172,33 @@ async def shortlist(
                 remote=is_remote,
                 location=location,
                 posted_at=posted_at,
+                seniority=seniority,
             )
-            for score, summary, title, company, url, is_remote, location, posted_at in rows
+            for score, summary, title, company, url, is_remote, location, posted_at, match_id, seen_at, applied_at, seniority in rows
         ],
-        total=await count_shortlist(session, user.id, min_score=min_score, remote=remote),
+        total=await count_shortlist(session, user.id, min_score=min_score, remote=remote, junior=junior),
     )
+
+
+@router.post("/shortlist/{match_id}/apply", status_code=status.HTTP_202_ACCEPTED, tags=["Pipeline"])
+async def start_apply(match_id: uuid.UUID) -> dict[str, str]:
+    """Opens a visible browser on the machine the API runs on, fills the form and
+    stops before Submit (ADR 0003). Only meaningful when the API runs on your desktop."""
+    # ponytail: fire-and-forget subprocess; the window is the UI. Mark "applied" is a manual click.
+    if not Path("profile.json").exists():  # the CLI would exit instantly and the 202 would be a lie
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="api/profile.json is missing — create it first (see cli/apply.py)")
+    log = open(APPLY_LOG, "w")  # a silent failure (no profile.json, no browser) is otherwise invisible
+    subprocess.Popen(
+        [sys.executable, "-m", "cli.apply", "--match-id", str(match_id)],
+        stdin=subprocess.DEVNULL,
+        stdout=log,
+        stderr=log,
+    )
+    return {"status": "started"}
+
+
+@router.post("/shortlist/{match_id}/{mark}", status_code=status.HTTP_204_NO_CONTENT, tags=["Pipeline"])
+async def mark_shortlist_item(match_id: uuid.UUID, mark: MatchMark, session: SessionDep) -> None:
+    user = await get_or_create_local_user(session)
+    if not await mark_match(session, user.id, match_id, mark):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No such match")

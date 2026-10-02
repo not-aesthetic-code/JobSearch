@@ -22,7 +22,7 @@ LOCAL_CLIENT_IDENTIFIER = "local"
 PHASES = ["ingest", "embed", "retrieve", "score", "done"]
 
 # every source run_pipeline knows how to ingest from — omitting `sources` runs all of them
-SOURCES = ["eldorado", "boards", "gmail"]
+SOURCES = ["eldorado", "boards"]  # ponytail: "gmail" disabled for now (slow, LLM call per mail); re-add to enable
 
 
 async def get_or_create_local_user(session: AsyncSession) -> User:

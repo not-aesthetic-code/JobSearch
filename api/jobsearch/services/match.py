@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from jobsearch.config import get_settings
 from jobsearch.database.models import JobPosting, MatchJob, MatchOutput, Resume
+from jobsearch.database.models.match_output import Seniority
 from jobsearch.services.llm import get_openai_client
 from jobsearch.services.resume_chunks import build_resume_context
 
@@ -25,13 +26,16 @@ _SYSTEM_PROMPT = (
     "experience and the skill list as exhaustive and authoritative. Never infer a "
     "gap — in tenure, seniority or skills — from a section not being shown: only "
     "the relevant sections are included, so the roles listed are not the full "
-    "career history."
+    "career history.\n"
+    "Also classify the level the posting asks for as junior, mid or senior — from the "
+    "title and required experience, regardless of the candidate."
 )
 
 
 class MatchScore(BaseModel):
     score: int = Field(ge=0, le=100)
     summary: str
+    seniority: Seniority
 
 
 async def _score(resume_context: str, posting: JobPosting) -> MatchScore:
@@ -89,7 +93,7 @@ async def process_match_jobs(session: AsyncSession, user_id: uuid.UUID, resume: 
         posting = await session.get(JobPosting, job.job_posting_id)
         try:
             result = await _score(await build_resume_context(session, resume, posting), posting)
-            session.add(MatchOutput(match_job_id=job.id, score=result.score, summary=result.summary))
+            session.add(MatchOutput(match_job_id=job.id, score=result.score, summary=result.summary, seniority=result.seniority))
             job.status = "completed"
             completed += 1
         except Exception as exc:  # noqa: BLE001 — one bad posting must not kill the run
@@ -112,7 +116,7 @@ _SORTS = {
 }
 
 
-def _shortlist_scope(stmt, user_id: uuid.UUID, min_score: int | None, remote: bool | None):
+def _shortlist_scope(stmt, user_id: uuid.UUID, min_score: int | None, remote: bool | None, junior: bool):
     """The joins and filters both the page query and the count query need — kept
     in one place so a paged total can never disagree with the page itself."""
     if min_score is None:
@@ -120,12 +124,14 @@ def _shortlist_scope(stmt, user_id: uuid.UUID, min_score: int | None, remote: bo
     stmt = (
         stmt.join(MatchJob, MatchOutput.match_job_id == MatchJob.id)
         .join(JobPosting, MatchJob.job_posting_id == JobPosting.id)
-        .where(MatchJob.user_id == user_id, MatchOutput.score >= min_score)
+        .where(MatchJob.user_id == user_id, MatchOutput.score >= min_score, MatchJob.dismissed_at.is_(None), JobPosting.url != "")  # gmail alerts stored no link — nothing to open or apply to
     )
     if remote is not None:
         # NULL is "the source never said" — it belongs to neither side, so an
         # explicit filter excludes it rather than guessing
         stmt = stmt.where(JobPosting.remote.is_(remote))
+    if not junior:  # junior is opt-in; NULL (scored before the column) stays visible
+        stmt = stmt.where(MatchOutput.seniority.is_distinct_from("junior"))
     return stmt
 
 
@@ -137,6 +143,7 @@ async def get_shortlist(
     offset: int = 0,
     sort: SortKey = "score",
     remote: bool | None = None,
+    junior: bool = False,
 ):
     """Completed matches at or above the threshold. `limit=None` returns
     everything — that's what the CLI indexes into by position."""
@@ -150,10 +157,15 @@ async def get_shortlist(
             JobPosting.remote,
             JobPosting.location,
             JobPosting.posted_at,
+            MatchJob.id,
+            MatchJob.seen_at,
+            MatchJob.applied_at,
+            MatchOutput.seniority,
         ),
         user_id,
         min_score,
         remote,
+        junior,
     ).order_by(*_SORTS[sort])
     if limit is not None:
         stmt = stmt.limit(limit).offset(offset)
@@ -161,8 +173,21 @@ async def get_shortlist(
 
 
 async def count_shortlist(
-    session: AsyncSession, user_id: uuid.UUID, min_score: int | None = None, remote: bool | None = None
+    session: AsyncSession, user_id: uuid.UUID, min_score: int | None = None, remote: bool | None = None, junior: bool = False
 ) -> int:
     # select_from is required: func.count() alone gives the join no left-hand table
-    stmt = _shortlist_scope(select(func.count()).select_from(MatchOutput), user_id, min_score, remote)
+    stmt = _shortlist_scope(select(func.count()).select_from(MatchOutput), user_id, min_score, remote, junior)
     return await session.scalar(stmt) or 0
+
+
+MatchMark = Literal["seen", "applied", "dismissed"]
+
+
+async def mark_match(session: AsyncSession, user_id: uuid.UUID, match_id: uuid.UUID, mark: MatchMark) -> bool:
+    """Stamp seen/applied/dismissed on one of the user's matches. False = not theirs / not found."""
+    match = await session.scalar(select(MatchJob).where(MatchJob.id == match_id, MatchJob.user_id == user_id))
+    if match is None:
+        return False
+    setattr(match, f"{mark}_at", func.now())
+    await session.commit()
+    return True

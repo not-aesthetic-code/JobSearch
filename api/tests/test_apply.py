@@ -65,3 +65,8 @@ def test_consent_labels_are_recognised_in_both_languages():
     assert is_consent("I agree to the privacy policy")
     assert is_consent("Wyrażam zgodę na przetwarzanie danych (RODO)")
     assert not is_consent("Years of React experience")
+
+
+def test_bare_name_label_is_first_name():
+    assert match_field("Name *") == "first_name"
+    assert match_field("Company name") is None

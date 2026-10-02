@@ -9,6 +9,7 @@ sender feels like it, so extraction is one structured LLM call per mail instead 
 per-sender parsers.
 """
 
+import asyncio
 import email
 import email.utils
 import imaplib
@@ -25,6 +26,8 @@ from jobsearch.services.ingest_remoteok import _strip_html  # same job: HTML -> 
 from jobsearch.services.llm import get_openai_client
 
 SOURCE = "gmail"
+MAX_MAILS_PER_RUN = 40  # newest first; reruns work through the backlog (679 mails ≈ 76 min in one go)
+BATCH = 16  # mails extracted concurrently; also the commit granularity
 MAX_BODY_CHARS = 20000  # alert mails are mostly markup; the job list is near the top
 
 _SYSTEM_PROMPT = (
@@ -166,19 +169,24 @@ async def ingest_gmail(session: AsyncSession, on_progress: Callable[[int, int], 
     client = _connect()
     stored = 0
     try:
-        uids = _search_senders(client, settings.gmail_senders)
-        for i, uid in enumerate(uids):
-            _, data = client.uid("FETCH", uid, "(RFC822)")
-            message = email.message_from_bytes(data[0][1])
-            message_id = message.get("Message-ID") or f"unknown:{uid.decode()}"
+        uids = _search_senders(client, settings.gmail_senders)[-MAX_MAILS_PER_RUN:]
+        for start in range(0, len(uids), BATCH):
+            batch = uids[start : start + BATCH]
+            # IMAP is sequential; the LLM calls are the slow part, so only those run together
+            messages = []
+            for uid in batch:
+                _, data = client.uid("FETCH", uid, "(RFC822)")
+                messages.append(email.message_from_bytes(data[0][1]))
+            extracted = await asyncio.gather(*(_extract_postings(message_text(m)) for m in messages))
 
-            postings = await _extract_postings(message_text(message))
-            rows = _to_rows(message_id, sent_at(message), postings)
-            if rows:
-                stored += await upsert_job_postings(session, rows)
-            _finish_message(client, uid)
-            if on_progress:
-                on_progress(i + 1, len(uids))
+            for i, (uid, message, postings) in enumerate(zip(batch, messages, extracted)):
+                message_id = message.get("Message-ID") or f"unknown:{uid.decode()}"
+                rows = _to_rows(message_id, sent_at(message), postings)
+                if rows:
+                    stored += await upsert_job_postings(session, rows)
+                _finish_message(client, uid)
+                if on_progress:
+                    on_progress(start + i + 1, len(uids))
         client.expunge()
     finally:
         client.logout()

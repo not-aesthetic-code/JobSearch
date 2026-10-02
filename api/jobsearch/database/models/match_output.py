@@ -1,14 +1,17 @@
 import uuid
 from datetime import datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
-from sqlalchemy import CheckConstraint, DateTime, ForeignKey, Integer, Text, func
+from sqlalchemy import CheckConstraint, DateTime, ForeignKey, Integer, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from jobsearch.database.base import Base
 
 if TYPE_CHECKING:
     from jobsearch.database.models.match_job import MatchJob
+
+
+Seniority = Literal["junior", "mid", "senior"]
 
 
 class MatchOutput(Base):
@@ -24,6 +27,7 @@ class MatchOutput(Base):
 
     score: Mapped[int] = mapped_column(Integer, nullable=False)
     summary: Mapped[str] = mapped_column(Text, nullable=False)
+    seniority: Mapped[str | None] = mapped_column(String, nullable=True)  # the posting's level; NULL = scored before this existed
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
     match_job: Mapped["MatchJob"] = relationship(back_populates="output")

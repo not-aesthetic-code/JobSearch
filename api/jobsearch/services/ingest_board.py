@@ -125,9 +125,10 @@ def parse_jsonld_posting(html: str, source: str, source_id: str, url: str) -> di
 
 async def collect_offers(client: httpx.AsyncClient, config: BoardConfig, keywords: list[str]) -> dict[str, str]:
     """Every offer link the board returns for these keywords."""
-    offers: dict[str, str] = {}
     paged = "{page}" in config.search_url
-    for keyword in keywords:
+
+    async def search(keyword: str) -> dict[str, str]:
+        found: dict[str, str] = {}
         for page in range(1, (config.max_pages if paged else 1) + 1):
             url = config.search_url.format(keyword=keyword, page=page)
             response = await client.get(url)
@@ -136,8 +137,13 @@ async def collect_offers(client: httpx.AsyncClient, config: BoardConfig, keyword
             page_offers = parse_links(response.text, url, config)
             if not page_offers:
                 break
-            offers.update(page_offers)
+            found.update(page_offers)
             await asyncio.sleep(config.delay_seconds)
+        return found
+
+    offers: dict[str, str] = {}
+    for found in await asyncio.gather(*(search(k) for k in keywords)):
+        offers.update(found)
     return offers
 
 
@@ -158,13 +164,18 @@ async def ingest_board(session: AsyncSession, config: BoardConfig, keywords: lis
         )
 
         rows = []
-        for source_id in set(offers) - known:
-            response = await client.get(offers[source_id])
+        gate = asyncio.Semaphore(8)  # ponytail: fixed cap, same idea as eldorado's CONCURRENCY
+
+        async def fetch(source_id: str) -> None:
+            async with gate:
+                response = await client.get(offers[source_id])
+                await asyncio.sleep(config.delay_seconds)
             if response.status_code == 200:
                 row = parse_jsonld_posting(response.text, config.name, source_id, offers[source_id])
                 if row is not None:
                     rows.append(row)
-            await asyncio.sleep(config.delay_seconds)
+
+        await asyncio.gather(*(fetch(s) for s in set(offers) - known))
 
     return await upsert_job_postings(session, rows)
 

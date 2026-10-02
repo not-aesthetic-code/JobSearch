@@ -1,11 +1,15 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useState } from "react";
+import { Icon } from "@/components/icons";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { errorDetail } from "@/lib/errorDetail";
 import { usePipelineProgress, type PipelineStatus } from "@/lib/usePipelineProgress";
 
 type ShortlistItem = {
+  id: string;
+  seen: boolean;
+  applied: boolean;
   score: number;
   summary: string;
   title: string;
@@ -14,6 +18,7 @@ type ShortlistItem = {
   remote: boolean | null;
   location: string | null;
   posted_at: string | null;
+  seniority: "junior" | "mid" | "senior" | null;
 };
 
 type ShortlistPage = {
@@ -22,20 +27,21 @@ type ShortlistPage = {
 };
 
 const PAGE_SIZE = 10;
+const SERVER_DOWN = "Can't reach the server. Check your connection and try again in a moment.";
 
-const SOURCE_ORDER = ["eldorado", "boards", "gmail"];
+const SOURCE_ORDER = ["eldorado", "boards"]; // gmail disabled server-side
 const SOURCE_LABELS: Record<string, string> = {
   eldorado: "Eldorado",
-  boards: "Boards.json",
+  boards: "Job boards",
   gmail: "Gmail alerts",
 };
 
 const PHASE_ORDER = ["ingest", "embed", "retrieve", "score", "done"];
 const PHASE_LABELS: Record<string, string> = {
-  ingest: "Ingest",
-  embed: "Embed",
-  retrieve: "Retrieve",
-  score: "Score",
+  ingest: "Collecting",
+  embed: "Preparing",
+  retrieve: "Matching",
+  score: "Ranking",
   done: "Done",
 };
 
@@ -49,19 +55,20 @@ function PhaseStepper({ phases, current }: { phases: string[]; current: string |
           <div key={p} className="flex items-center">
             <div className="flex flex-col items-center gap-1">
               <span
+                aria-hidden="true"
                 className={
                   state === "done"
-                    ? "flex h-5 w-5 items-center justify-center rounded-full bg-black text-[10px] text-white dark:bg-white dark:text-black"
+                    ? "flex h-5 w-5 items-center justify-center rounded-full bg-ink text-on-ink"
                     : state === "active"
-                      ? "flex h-5 w-5 items-center justify-center rounded-full border-2 border-black dark:border-white"
-                      : "flex h-5 w-5 items-center justify-center rounded-full border border-gray-300 dark:border-gray-700"
+                      ? "flex h-5 w-5 items-center justify-center rounded-full border-2 border-ink"
+                      : "flex h-5 w-5 items-center justify-center rounded-full border border-line"
                 }
               >
-                {state === "done" ? "✓" : ""}
+                {state === "done" && <Icon name="check" className="h-2.5 w-2.5" />}
               </span>
               <span
                 className={`text-[11px] ${
-                  state === "pending" ? "text-gray-400 dark:text-gray-600" : "text-gray-700 dark:text-gray-300"
+                  state === "pending" ? "text-muted" : "text-body"
                 }`}
               >
                 {PHASE_LABELS[p] ?? p}
@@ -70,7 +77,7 @@ function PhaseStepper({ phases, current }: { phases: string[]; current: string |
             {i < phases.length - 1 && (
               <span
                 className={`mx-1.5 mb-4 h-px w-8 shrink-0 ${
-                  state === "done" ? "bg-black dark:bg-white" : "bg-gray-200 dark:bg-gray-800"
+                  state === "done" ? "bg-ink" : "bg-line"
                 }`}
               />
             )}
@@ -87,6 +94,11 @@ const SORTS = [
   { value: "added", label: "Recently added" },
 ] as const;
 
+const LEVELS = [
+  { value: "", label: "Senior & mid" },
+  { value: "true", label: "Include junior" },
+] as const;
+
 const MODES = [
   { value: "", label: "Any" },
   { value: "true", label: "Remote" },
@@ -95,11 +107,17 @@ const MODES = [
 
 // "" defers to the backend's configured match_threshold (currently 60)
 const MIN_SCORES = [
-  { value: "", label: "Shortlist" },
+  { value: "", label: "Best matches" },
   { value: "40", label: "40+" },
   { value: "20", label: "20+" },
-  { value: "0", label: "Any" },
+  { value: "0", label: "All" },
 ] as const;
+
+function scoreColor(score: number) {
+  if (score >= 60) return "bg-green-bg text-green-fg";
+  if (score >= 40) return "bg-yellow-bg text-yellow-fg";
+  return "bg-chip text-muted";
+}
 
 function Chip({
   active,
@@ -117,10 +135,10 @@ function Chip({
       onClick={onClick}
       disabled={disabled}
       aria-pressed={active}
-      className={`rounded-full border px-3 py-1 text-sm transition-colors disabled:opacity-40 ${
+      className={`rounded-md border px-3 py-1 text-sm transition-colors disabled:opacity-40 ${
         active
-          ? "border-black bg-black text-white dark:border-white dark:bg-white dark:text-black"
-          : "border-gray-300 text-gray-600 hover:border-gray-400 dark:border-gray-700 dark:text-gray-300"
+          ? "border-ink bg-ink text-on-ink"
+          : "border-line bg-surface text-body hover:border-muted"
       }`}
     >
       {children}
@@ -147,16 +165,17 @@ function SourceToggle({
       onClick={onClick}
       disabled={disabled}
       aria-pressed={active}
-      className="flex items-center gap-1.5 rounded-lg border border-gray-300 px-3 py-1 text-sm text-gray-700 transition-colors disabled:opacity-40 dark:border-gray-700 dark:text-gray-300"
+      className="flex items-center gap-1.5 rounded-md border border-line bg-surface px-3 py-1 text-sm text-body transition-colors hover:border-muted disabled:opacity-40"
     >
       <span
-        className={`flex h-3.5 w-3.5 items-center justify-center rounded-sm border text-[9px] leading-none ${
+        aria-hidden="true"
+        className={`flex h-3.5 w-3.5 items-center justify-center rounded-sm border ${
           active
-            ? "border-black bg-black text-white dark:border-white dark:bg-white dark:text-black"
-            : "border-gray-400 dark:border-gray-600"
+            ? "border-ink bg-ink text-on-ink"
+            : "border-muted"
         }`}
       >
-        {active ? "✓" : ""}
+        {active && <Icon name="check" className="h-2 w-2" />}
       </span>
       {children}
     </button>
@@ -177,12 +196,33 @@ export default function Home() {
   const [sort, setSort] = useState<string>("score");
   const [remote, setRemote] = useState<string>("");
   const [minScore, setMinScore] = useState<string>("");
+  const [junior, setJunior] = useState<string>("");
   const [hasResume, setHasResume] = useState<boolean | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [sources, setSources] = useState<Set<string>>(new Set(SOURCE_ORDER));
   const { toast, dismissToast, bar, barPct, elapsedLabel, etaLabel, jobsLine } = usePipelineProgress(status);
 
+  const loading = status === null && !error;
+  const latestRequest = useRef(0); // polling + filter clicks overlap; only the newest response may render
+
+  // optimistic: flip the card now, tell the server after; a failed call is corrected by the next refresh
+  const act = useCallback(async (id: string, action: "seen" | "applied" | "dismissed" | "apply") => {
+    if (action === "dismissed") {
+      setPage((p) => ({ items: p.items.filter((it) => it.id !== id), total: p.total - 1 }));
+    } else if (action !== "apply") {
+      const key = action === "seen" ? "seen" : "applied";
+      setPage((p) => ({ ...p, items: p.items.map((it) => (it.id === id ? { ...it, [key]: true } : it)) }));
+    }
+    try {
+      const res = await fetch(`/api/shortlist/${id}/${action}`, { method: "POST" });
+      if (!res.ok && action === "apply") setError(errorDetail(await res.json().catch(() => null)));
+    } catch {
+      setError(SERVER_DOWN);
+    }
+  }, []);
+
   const refresh = useCallback(async () => {
+    const requestId = ++latestRequest.current;
     const params = new URLSearchParams({
       limit: String(PAGE_SIZE),
       offset: String(pageIndex * PAGE_SIZE),
@@ -190,20 +230,23 @@ export default function Home() {
     });
     if (remote) params.set("remote", remote);
     if (minScore) params.set("min_score", minScore);
+    if (junior) params.set("junior", junior);
     try {
       const [statusRes, listRes, resumeRes] = await Promise.all([
         fetch("/api/pipeline/status"),
         fetch(`/api/shortlist?${params}`),
         fetch("/api/profile/resume"),
       ]);
-      setStatus(await statusRes.json());
-      setPage(await listRes.json());
-      setHasResume((await resumeRes.json()) !== null);
+      const [nextStatus, nextPage, resume] = await Promise.all([statusRes.json(), listRes.json(), resumeRes.json()]);
+      if (requestId !== latestRequest.current) return;
+      setStatus(nextStatus);
+      setPage(nextPage);
+      setHasResume(resume !== null);
       setError(null);
     } catch {
-      setError("Backend unreachable — is the FastAPI server running?");
+      setError(SERVER_DOWN);
     }
-  }, [pageIndex, sort, remote, minScore]);
+  }, [pageIndex, sort, remote, minScore, junior]);
 
   useEffect(() => {
     refresh();
@@ -227,15 +270,20 @@ export default function Home() {
 
   async function run() {
     setError(null);
-    const res = await fetch("/api/pipeline/run", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      // no resume_text = use the CV stored in the profile; sources = [] just
-      // re-retrieves/re-scores whatever is already ingested, no fetching at all
-      body: JSON.stringify({ sources: [...sources] }),
-    });
-    if (!res.ok) {
-      setError(errorDetail(await res.json().catch(() => null)));
+    try {
+      const res = await fetch("/api/pipeline/run", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        // no resume_text = use the CV stored in the profile; sources = [] just
+        // re-retrieves/re-scores whatever is already ingested, no fetching at all
+        body: JSON.stringify({ sources: [...sources] }),
+      });
+      if (!res.ok) {
+        setError(errorDetail(await res.json().catch(() => null)));
+        return;
+      }
+    } catch {
+      setError(SERVER_DOWN);
       return;
     }
     refresh();
@@ -243,9 +291,14 @@ export default function Home() {
 
   async function stop() {
     setError(null);
-    const res = await fetch("/api/pipeline/stop", { method: "POST" });
-    if (!res.ok) {
-      setError(errorDetail(await res.json().catch(() => null)));
+    try {
+      const res = await fetch("/api/pipeline/stop", { method: "POST" });
+      if (!res.ok) {
+        setError(errorDetail(await res.json().catch(() => null)));
+        return;
+      }
+    } catch {
+      setError(SERVER_DOWN);
       return;
     }
     refresh();
@@ -256,46 +309,54 @@ export default function Home() {
   const last = Math.min(page.total, (pageIndex + 1) * PAGE_SIZE);
 
   return (
-    <main className="mx-auto max-w-3xl px-6 py-12 font-sans">
+    <main className="mx-auto max-w-4xl px-6 py-16 sm:py-24">
       <div className="flex items-baseline justify-between gap-4">
-        <h1 className="text-2xl font-bold">Job Search</h1>
-        <Link href="/profile" className="text-sm text-gray-500 hover:underline dark:text-gray-400">
-          Profile →
+        <h1 className="text-4xl sm:text-5xl">Job Search</h1>
+        <Link href="/profile" className="inline-flex items-center gap-1.5 text-sm text-muted transition-colors hover:text-ink">
+          Profile<Icon name="arrow" />
         </Link>
       </div>
-      <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">
-        Runs against the CV in your profile and scores what it finds.
+      <p className="mt-3 text-muted">
+        Finds jobs that match your CV and ranks them for you.
       </p>
 
-      <div className="mt-6 flex flex-wrap items-center gap-4">
+      {hasResume === false && (
+        <div className="mt-10 rounded-lg border border-line bg-surface p-8">
+          <h2 className="text-2xl">Start by adding your CV</h2>
+          <p className="mt-2 text-sm text-muted">
+            Upload a PDF or paste the text. It takes about 10 seconds, and then we find the matching jobs.
+          </p>
+          <Link
+            href="/profile"
+            className="mt-5 inline-block rounded-md bg-ink px-5 py-2 text-sm font-medium text-on-ink transition-colors hover:bg-ink-hover disabled:opacity-40"
+          >
+            Add your CV
+          </Link>
+        </div>
+      )}
+
+      <div className={`mt-10 flex flex-wrap items-center gap-3 ${hasResume === false ? "hidden" : ""}`}>
         <button
           onClick={run}
           disabled={status?.running || hasResume !== true}
-          className="rounded-lg bg-black px-5 py-2 text-sm font-medium text-white disabled:opacity-40 dark:bg-white dark:text-black"
+          className="rounded-md bg-ink px-5 py-2 text-sm font-medium text-on-ink transition-colors hover:bg-ink-hover disabled:opacity-40"
         >
-          {status?.running ? "Running…" : "Find offers"}
+          {status?.running ? "Searching…" : "Find Jobs"}
         </button>
         {status?.running && (
           <button
             onClick={stop}
-            className="rounded-lg border border-gray-300 px-5 py-2 text-sm font-medium text-gray-700 hover:border-gray-400 dark:border-gray-700 dark:text-gray-300"
+            className="rounded-md border border-line bg-surface px-5 py-2 text-sm font-medium text-body transition-colors hover:border-muted"
           >
             Stop
           </button>
         )}
-        {hasResume === false && (
-          <span className="text-sm text-gray-500 dark:text-gray-400">
-            No CV yet —{" "}
-            <Link href="/profile" className="underline">
-              add one
-            </Link>{" "}
-            to get started.
-          </span>
-        )}
       </div>
 
-      <div className="mt-3 flex flex-wrap items-center gap-2">
-        <span className="text-sm text-gray-500 dark:text-gray-400">Fetch from</span>
+      <details className={`mt-3 ${hasResume === false ? "hidden" : ""}`}>
+        <summary className="cursor-pointer text-sm text-muted">Advanced: choose sources</summary>
+      <div className="mt-2 flex flex-wrap items-center gap-2">
+        <span className="text-sm text-muted">Search in</span>
         {(status?.sources?.length ? status.sources : SOURCE_ORDER).map((source) => (
           <SourceToggle
             key={source}
@@ -307,74 +368,75 @@ export default function Home() {
           </SourceToggle>
         ))}
         {sources.size === 0 && (
-          <span className="text-xs text-gray-400 dark:text-gray-600">
-            nothing to fetch — just re-scores what&apos;s already stored
+          <span className="text-xs text-muted">
+            No source selected — only re-ranks jobs you already have.
           </span>
         )}
       </div>
+      </details>
 
       {status?.running && (
-        <div className="mt-5 rounded-lg border border-gray-200 p-4 dark:border-gray-800">
+        <div role="status" aria-live="polite" className="mt-6 rounded-lg border border-line bg-surface p-6">
           <div className="flex justify-center">
             <PhaseStepper phases={status.phases?.length ? status.phases : PHASE_ORDER} current={status.phase} />
           </div>
 
-          <div className="mt-3 flex flex-wrap items-center justify-center gap-2 text-sm text-gray-600 dark:text-gray-300">
-            <span className="h-2.5 w-2.5 animate-spin rounded-full border-2 border-gray-400 border-t-transparent" />
+          <div className="mt-3 flex flex-wrap items-center justify-center gap-2 text-sm text-body">
+            <span aria-hidden="true" className="h-2.5 w-2.5 animate-spin motion-reduce:animate-none rounded-full border-2 border-muted border-t-transparent" />
             {status.phase === "score"
-              ? `scoring ${bar?.done ?? 0}/${bar?.total ?? 0}`
+              ? `Ranking ${bar?.done ?? 0} of ${bar?.total ?? 0} jobs`
               : status.phase === "ingest" && status.progress
-                ? `fetching ${status.progress.source}: ${status.progress.done}/${status.progress.total}`
+                ? `Collecting jobs from ${SOURCE_LABELS[status.progress.source] ?? status.progress.source}: ${status.progress.done} of ${status.progress.total}`
                 : `${PHASE_LABELS[status.phase ?? ""] ?? "starting"}…`}
-            {etaLabel && <span className="text-gray-400 dark:text-gray-600">~{etaLabel} left</span>}
+            {etaLabel && <span className="text-muted">~{etaLabel} left</span>}
           </div>
 
           {bar && (
-            <div className="mx-auto mt-2 h-1.5 w-full max-w-xs overflow-hidden rounded-full bg-gray-100 dark:bg-gray-800">
+            <div className="mx-auto mt-2 h-1.5 w-full max-w-xs overflow-hidden rounded-full bg-chip">
               <div
-                className="h-full rounded-full bg-black transition-all duration-500 dark:bg-white"
+                className="h-full rounded-full bg-ink transition-[width] duration-500"
                 style={{ width: `${barPct}%` }}
               />
             </div>
           )}
           {status.phase === "score" && jobsLine && (
-            <p className="mt-1.5 text-center text-xs text-gray-500 dark:text-gray-400">{jobsLine}</p>
+            <p className="mt-1.5 text-center text-xs text-muted">{jobsLine}</p>
           )}
-          <p className="mt-2 text-center text-xs tabular-nums text-gray-400 dark:text-gray-600">
+          <p className="mt-2 text-center font-mono text-xs tabular-nums text-muted">
             {elapsedLabel} elapsed
           </p>
         </div>
       )}
 
       {toast && (
-        <div className="mt-4 flex items-center gap-2.5 rounded-lg border border-gray-200 bg-gray-50 px-4 py-2.5 text-sm dark:border-gray-800 dark:bg-gray-900">
-          <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-black text-[10px] text-white dark:bg-white dark:text-black">
-            ✓
+        <div role="status" aria-live="polite" className="mt-4 flex items-center gap-2.5 rounded-lg border border-line bg-green-bg px-4 py-2.5 text-sm text-green-fg">
+          <span aria-hidden="true" className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-green-fg text-green-bg">
+            <Icon name="check" className="h-2.5 w-2.5" />
           </span>
           <span>
-            Run complete — {toast.completed} scored{toast.failed ? `, ${toast.failed} failed` : ""}.
+            Done — {toast.completed} jobs ranked{toast.failed ? `, ${toast.failed} failed` : ""}.
           </span>
           <button
             onClick={dismissToast}
-            className="ml-auto text-gray-400 hover:text-gray-600 dark:hover:text-gray-300"
+            className="ml-auto opacity-60 hover:opacity-100"
             aria-label="Dismiss"
           >
-            ✕
+            <Icon name="x" />
           </button>
         </div>
       )}
 
       {(error || status?.last_error) && (
-        <p className="mt-3 text-sm text-red-600 dark:text-red-400">
-          {error ?? `Last run failed: ${status?.last_error}`}
+        <p role="alert" className="mt-3 rounded-md bg-red-bg px-3 py-2 text-sm text-red-fg">
+          {error ?? `The last search failed: ${status?.last_error}. Try again.`}
         </p>
       )}
 
-      <h2 className="mt-10 text-lg font-semibold">Shortlist</h2>
+      <h2 className="mt-20 text-3xl">Your matches</h2>
 
-      <div className="mt-3 flex flex-wrap items-center gap-x-6 gap-y-3 border-y border-gray-200 py-3 dark:border-gray-800">
+      <div className="mt-5 flex flex-wrap items-center gap-x-8 gap-y-3 border-y border-line py-4">
         <div className="flex flex-wrap items-center gap-2">
-          <span className="text-sm text-gray-500 dark:text-gray-400">Sort</span>
+          <span className="text-sm text-muted">Sort</span>
           {SORTS.map((option) => (
             <Chip
               key={option.value}
@@ -389,7 +451,7 @@ export default function Home() {
           ))}
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          <span className="text-sm text-gray-500 dark:text-gray-400">Work mode</span>
+          <span className="text-sm text-muted">Work mode</span>
           {MODES.map((option) => (
             <Chip
               key={option.value}
@@ -404,7 +466,22 @@ export default function Home() {
           ))}
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          <span className="text-sm text-gray-500 dark:text-gray-400">Score</span>
+          <span className="text-sm text-muted">Level</span>
+          {LEVELS.map((option) => (
+            <Chip
+              key={option.value}
+              active={junior === option.value}
+              onClick={() => {
+                setJunior(option.value);
+                setPageIndex(0);
+              }}
+            >
+              {option.label}
+            </Chip>
+          ))}
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-sm text-muted" title="How well a job fits your CV, 0–100">Match score</span>
           {MIN_SCORES.map((option) => (
             <Chip
               key={option.value}
@@ -420,68 +497,114 @@ export default function Home() {
         </div>
       </div>
 
-      <p className="mt-3 text-sm text-gray-500 dark:text-gray-400">
-        {page.total === 0 ? "No matches" : `Showing ${first}–${last} of ${page.total}`}
+      <p className="mt-4 text-sm text-muted">
+        {loading ? "Loading…" : page.total === 0 ? "No matches" : `Showing ${first}–${last} of ${page.total.toLocaleString()}`}
       </p>
 
-      <ul className="mt-4 space-y-4">
-        {page.items.map((item) => (
-          <li key={item.url} className="rounded-lg border border-gray-200 p-4 dark:border-gray-800">
-            <div className="flex items-baseline gap-3">
-              <span className="rounded bg-green-100 px-2 py-0.5 text-sm font-bold text-green-800 dark:bg-green-900 dark:text-green-200">
-                {item.score}
+      <ul className="mt-4 space-y-3">
+        {page.items.map((item, i) => (
+          <li
+            key={`${item.url}-${i}`}
+            style={{ "--index": Math.min(i, 8) } as React.CSSProperties}
+            className={`card rise relative rounded-lg border border-line bg-surface p-6 ${
+              item.applied ? "opacity-60" : item.seen ? "opacity-80" : ""
+            }`}
+          >
+            <button
+              onClick={() => act(item.id, "dismissed")}
+              aria-label={`Remove ${item.title} from the list`}
+              title="Remove from list"
+              className="absolute right-3 top-3 rounded-md p-1.5 text-muted transition-colors hover:text-ink"
+            >
+              <Icon name="x" className="h-3 w-3" />
+            </button>
+            <div className="flex items-baseline gap-3 pr-8">
+              <span className={`shrink-0 whitespace-nowrap rounded-full px-2.5 py-0.5 text-xs font-medium uppercase tracking-[0.05em] tabular-nums ${scoreColor(item.score)}`}>
+                {item.score}% match
               </span>
               <a
                 href={item.url}
                 target="_blank"
                 rel="noreferrer"
-                className="font-medium hover:underline"
+                onClick={() => !item.seen && act(item.id, "seen")}
+                className="min-w-0 break-words font-medium text-ink hover:underline"
               >
                 {item.title}
+                <span className="sr-only"> (opens in new tab)</span>
               </a>
-              <span className="text-sm text-gray-500 dark:text-gray-400">
-                {item.company ?? "?"}
+              <span className="text-sm text-muted">
+                {item.company ?? "Company not listed"}
               </span>
             </div>
-            <div className="mt-1.5 flex flex-wrap items-center gap-2 text-xs text-gray-500 dark:text-gray-400">
+            <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-muted">
               {item.remote !== null && (
-                <span className="rounded bg-gray-100 px-1.5 py-0.5 dark:bg-gray-800">
+                <span className="rounded-full bg-blue-bg px-2 py-0.5 uppercase tracking-[0.05em] text-blue-fg">
                   {item.remote ? "Remote" : "On-site"}
+                </span>
+              )}
+              {item.seniority && (
+                <span className="rounded-full bg-blue-bg px-2 py-0.5 uppercase tracking-[0.05em] text-blue-fg">
+                  {item.seniority}
                 </span>
               )}
               {item.location && <span>{item.location}</span>}
               {daysAgo(item.posted_at) && <span>· {daysAgo(item.posted_at)}</span>}
             </div>
-            <p className="mt-2 text-sm text-gray-600 dark:text-gray-300">{item.summary}</p>
+            <p className="mt-3 line-clamp-3 text-sm text-body">{item.summary}</p>
+            <div className="mt-4 flex items-center gap-2 text-sm">
+              {item.applied ? (
+                <span className="inline-flex items-center gap-1.5 rounded-full bg-green-bg px-3 py-1 text-green-fg">
+                  <Icon name="check" className="h-3 w-3" />Applied
+                </span>
+              ) : (
+                <>
+                  <button
+                    onClick={() => act(item.id, "apply")}
+                    title="Opens a browser on this machine and fills the form. You review and click Send."
+                    className="rounded-md border border-line bg-surface px-3 py-1 text-body transition-colors hover:border-muted"
+                  >
+                    Auto-fill application
+                  </button>
+                  <button
+                    onClick={() => act(item.id, "applied")}
+                    className="rounded-md px-3 py-1 text-muted transition-colors hover:text-ink"
+                  >
+                    Mark as applied
+                  </button>
+                </>
+              )}
+            </div>
           </li>
         ))}
-        {page.total === 0 && (
-          <li className="text-sm text-gray-500 dark:text-gray-400">
+        {!loading && page.total === 0 && (
+          <li className="text-sm text-muted">
             {remote || minScore
-              ? "Nothing matches these filters — try widening Work mode or Score."
-              : "Nothing yet — run it to populate the shortlist."}
+              ? "Nothing matches these filters. Try \"Any\" work mode or \"All\" match scores."
+              : hasResume === false
+                ? "Add your CV above to get your first matches."
+                : "No matches yet. Click \"Find Jobs\" to get your first results."}
           </li>
         )}
       </ul>
 
       {page.total > PAGE_SIZE && (
-        <div className="mt-6 flex items-center gap-4 text-sm">
+        <div className="mt-8 flex items-center gap-4 text-sm">
           <button
             onClick={() => setPageIndex((i) => i - 1)}
             disabled={pageIndex === 0}
-            className="rounded-lg border border-gray-300 px-3 py-1.5 disabled:opacity-40 dark:border-gray-700"
+            className="rounded-md border border-line bg-surface px-3 py-1.5 hover:border-muted disabled:opacity-40"
           >
-            ← Previous
+            <Icon name="arrow" back className="mr-1.5 h-3 w-3" />Previous
           </button>
-          <span className="text-gray-500 dark:text-gray-400">
+          <span className="text-muted">
             Page {pageIndex + 1} of {lastPage + 1}
           </span>
           <button
             onClick={() => setPageIndex((i) => i + 1)}
             disabled={pageIndex >= lastPage}
-            className="rounded-lg border border-gray-300 px-3 py-1.5 disabled:opacity-40 dark:border-gray-700"
+            className="rounded-md border border-line bg-surface px-3 py-1.5 hover:border-muted disabled:opacity-40"
           >
-            Next →
+            Next<Icon name="arrow" className="ml-1.5 h-3 w-3" />
           </button>
         </div>
       )}

@@ -1,4 +1,6 @@
-from jobsearch.services.ingest_eldorado import _parse_detail_page, _parse_search_page
+import json
+
+from jobsearch.services.ingest_eldorado import _parse_detail_page, _parse_mcp_result, _parse_search_page
 
 SEARCH_HTML = """
 <div data-offer-id="261752">
@@ -65,3 +67,9 @@ def test_remote_is_true_only_when_the_page_says_telecommute():
     )
     # said nothing at all -> unknown, which the filter excludes from both sides
     assert _parse_detail_page(_detail_html(extra=""), "1")["remote"] is None
+
+
+def test_parse_mcp_result_extracts_offer_paths_and_strips_utm():
+    text = json.dumps({"jobs": [{"url": "https://czyjesteldorado.pl/praca/447418-devops-itfs?utm_source=mcp"}]})
+    body = {"result": {"content": [{"type": "text", "text": text}]}}
+    assert _parse_mcp_result(body) == {"447418": "/praca/447418-devops-itfs"}
